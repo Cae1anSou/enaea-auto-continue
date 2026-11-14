@@ -10,7 +10,7 @@
 
 在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。右下角出现面板后，点击“读取课程”，选择倍速，再点击“开始连播”。如果新标签页被拦截，允许本网站打开弹出式窗口后重试。
 
-面板里的“设定倍速”是你选择的目标值，“实际倍速”与播放/暂停/加载状态由播放页的媒体事件即时更新，并有每秒采样兜底；切回控制页时会立即重新读取。分集切换或播放器刚启动时，两者可能暂时不同。正常播放后的手动暂停不会被反复恢复；首次启动失败最多重试三轮，Chrome 拦截有声自动播放时会尝试静音启动，可在播放页手动开启声音。
+面板里的“设定倍速”是你选择的目标值，“实际倍速”与播放/暂停/加载状态由播放页的媒体事件即时更新，并有每秒采样兜底；切回控制页时会立即重新读取。分集切换或播放器刚启动时，两者可能暂时不同。正常播放后的手动暂停不会被反复恢复；首次启动每轮最多等待 8 秒，失败最多重试三轮，Chrome 拦截有声自动播放时会尝试静音启动，可在播放页手动开启声音。
 
 “服务端已学”来自重新读取的课程表汇总，每分钟同步一次，也可点击“刷新学时”。“本次连播增量”是最新汇总与本次开播前基准的差值，跨课程或切换倍速不重置，停止后重新开始会重新建立基准。同步失败会保留上次数据并提示；如果开播时读取失败，则在首次成功同步时建立基准，面板会显示基准时间。这个增量不是根据播放速度估算的，也不等于刚切换到某个倍速后的单独收益。
 
@@ -69,6 +69,14 @@
     return 1;
   }
 
+  function setStatus(text) {
+    if (status.textContent !== text) status.textContent = text;
+  }
+
+  function applyRate(video, rate = selectedRate()) {
+    if (video.playbackRate !== rate) video.playbackRate = rate;
+  }
+
   /** 解绑旧文档，避免换课或停止后旧视频事件继续更新面板。 */
   function detachPlayerEvents() {
     if (!mediaBinding) return;
@@ -96,16 +104,27 @@
         // 平台的 play 事件可能重置为1倍；等本轮处理完成后再落实用户选择，不主动恢复暂停。
         queueMicrotask(() => {
           if (!isActive() || event.target !== doc.querySelector("video")) return;
-          event.target.playbackRate = selectedRate();
+          applyRate(event.target);
           renderVideoState();
         });
       }
       renderVideoState();
     };
     for (const event of events) doc.addEventListener(event, handler, true);
+    const containsVideo = nodes => {
+      for (const node of nodes) {
+        if (node.nodeType === 1 &&
+            (node.tagName === "VIDEO" || node.querySelector("video"))) return true;
+      }
+      return false;
+    };
     const observer = typeof player.MutationObserver === "function"
-      ? new player.MutationObserver(() => {
-        if (isActive()) renderVideoState();
+      ? new player.MutationObserver(records => {
+        if (!isActive()) return;
+        // 字幕、计时文字和普通控件变化不影响视频节点，不必触发状态查询。
+        if (records.some(record => containsVideo(record.addedNodes) || containsVideo(record.removedNodes))) {
+          renderVideoState();
+        }
       }) : null;
     observer?.observe(doc.documentElement, { childList: true, subtree: true });
     mediaBinding = { doc, events, handler, observer };
@@ -236,7 +255,7 @@
     try {
       let total = Infinity;
       for (let start = 0; start < total;) {
-        status.textContent = `正在读取课程：${rows.length} 门…`;
+        setStatus(`正在读取课程：${rows.length} 门…`);
         const data = await readJSON("/circleIndex.do", {
           action: "getMyClass", start: String(start), limit: "20",
           circleId, syllabusId, isCompleted: "", categoryRemark: "all",
@@ -262,11 +281,11 @@
             !Number.isFinite(progress) || progress >= 100) continue;
         queue.push({ id, title: course.courseTitle || id });
       }
-      status.textContent = `已读取 ${rows.length} 门，待播放 ${queue.length} 门。\n已完成、无权限及外链等课程不加入队列。`;
+      setStatus(`已读取 ${rows.length} 门，待播放 ${queue.length} 门。\n已完成、无权限及外链等课程不加入队列。`);
       startButton.disabled = queue.length === 0;
     } catch (error) {
       queue = [];
-      status.textContent = `读取失败：${error.message}`;
+      setStatus(`读取失败：${error.message}`);
     } finally {
       loading = false;
       loadButton.disabled = false;
@@ -301,7 +320,7 @@
     current.replayProgress = new Map();
     current.originalMutes = new Map();
     current.switchingUntil = 0;
-    status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n正在打开课程…`;
+    setStatus(`${current.index + 1}/${queue.length} · ${queue[current.index].title}\n正在打开课程…`);
     const url = new URL("/viewerforccvideo.do", location.origin);
     url.search = new URLSearchParams({ courseId: queue[current.index].id, circleId });
     player.location.href = url.href;
@@ -315,13 +334,14 @@
       clearInterval(run.studyTimer);
     }
     run = null;
+    previous?.playController.abort();
     detachPlayerEvents();
     cancelStudyRead();
     try {
       if (player && !player.closed) {
         for (const video of player.document.querySelectorAll("video")) {
           video.pause();
-          video.playbackRate = 1;
+          applyRate(video, 1);
           if (previous?.originalMutes.has(video)) video.muted = previous.originalMutes.get(video);
         }
       }
@@ -331,9 +351,34 @@
     }
     startButton.disabled = !queue.length;
     loadButton.disabled = false;
-    status.textContent = message;
+    setStatus(message);
     renderVideoState();
     renderStudy();
+  }
+
+  /** 限制启动等待；停止时立即取消等待，避免主循环长期被未完成的播放承诺占住。 */
+  async function playWithTimeout(current, video) {
+    const signal = current.playController.signal;
+    if (signal.aborted) throw new DOMException("播放启动已取消", "AbortError");
+    let timeout;
+    let cancel;
+    try {
+      const cancelled = new Promise((_, reject) => {
+        cancel = () => reject(new DOMException("播放启动已取消", "AbortError"));
+        signal.addEventListener("abort", cancel, { once: true });
+        timeout = setTimeout(() => {
+          reject(new DOMException("播放启动超过8秒，等待后重试", "TimeoutError"));
+          if (run === current) video.pause();
+        }, 8000);
+      });
+      const pending = Promise.resolve(video.play());
+      // 超时或取消后底层承诺仍可能返回；控制器已停止时不能留下意外播放。
+      void pending.then(() => { if (run !== current && !run) video.pause(); }, () => {});
+      await Promise.race([pending, cancelled]);
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", cancel);
+    }
   }
 
   /** 播放失败不记为成功；仅在首次启动阶段重试，播放过后的手动暂停保持不变。 */
@@ -358,13 +403,13 @@
     state.attempts++;
     try {
       try {
-        await video.play();
+        await playWithTimeout(current, video);
       } catch (error) {
         // 有声自动播放被拦截时改为静音启动，不通过伪造点击绕过浏览器策略。
         if (error.name !== "NotAllowedError" || video.muted || run !== current) throw error;
         if (!current.originalMutes.has(video)) current.originalMutes.set(video, video.muted);
         video.muted = true;
-        await video.play();
+        await playWithTimeout(current, video);
       }
       if (run !== current) {
         if (!run) video.pause();
@@ -409,7 +454,7 @@
   /** 片尾先留出最后一次上报时间；时长不足时重播，连续无增量则停止避免空转。 */
   async function handleEnded(current, items, video, selected) {
     current.endedSince ||= Date.now();
-    status.textContent = "视频已结束，正在核对最后一次学时记录…";
+    setStatus("视频已结束，正在核对最后一次学时记录…");
     if (Date.now() - current.endedSince < 5000 || Date.now() - current.lastCheck < 5000) return;
     current.lastCheck = Date.now();
     const records = await confirmProgress(current, items);
@@ -432,8 +477,8 @@
     video.currentTime = 0;
     const message = await ensureStarted(current, video, target.dataset.id);
     if (run !== current) return;
-    video.playbackRate = selectedRate();
-    status.textContent = `该分集已到片尾，学时进度 ${progress}%，正在从头补足播放。\n${message}`;
+    applyRate(video);
+    setStatus(`该分集已到片尾，学时进度 ${progress}%，正在从头补足播放。\n${message}`);
   }
 
   /** 异步检查串行执行，停止或重启后旧请求不得继续导航。 */
@@ -461,15 +506,15 @@
         // 分集切换会暂时移除视频节点；只计算本次连续缺失，不能沿用整门课的打开时间。
         current.playerMissingSince ??= Date.now();
         if (Date.now() - current.playerMissingSince > 60000) throw new Error("播放器加载超时。");
-        status.textContent = "正在等待播放器初始化或切换分集…";
+        setStatus("正在等待播放器初始化或切换分集…");
         return;
       }
       current.playerMissingSince = null;
       continueAfterRest(doc);
-      video.playbackRate = selectedRate();
+      applyRate(video);
       // 休息提醒之外的弹窗留给用户，不切分集，也不尝试恢复播放。
       if ([...doc.querySelectorAll(".dialog-header")].some(el => el.getClientRects().length)) {
-        status.textContent = "播放页有提示或测验，请手动处理后继续。";
+        setStatus("播放页有提示或测验，请手动处理后继续。");
         return;
       }
       const unfinished = items.filter(item => {
@@ -499,10 +544,12 @@
             video.currentSrc !== source || !selected.classList.contains("current")) return;
         // 暂停状态由独立监视器即时显示，避免两处文案给出不同结论。
         if (playbackMessage === "已暂停，请在播放页手动恢复。") playbackMessage = "";
-        status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n剩余 ${unfinished.length} 个未完成分集`;
-        if (video.muted) status.textContent += "\n当前静音，可在播放页手动开启声音。";
-        if (playbackMessage) status.textContent += `\n${playbackMessage}`;
-        if (current.replayProgress.has(selected?.dataset.id)) status.textContent += "\n正在重播以补足该分集学时。";
+        const lines = [`${current.index + 1}/${queue.length} · ${queue[current.index].title}`,
+          `剩余 ${unfinished.length} 个未完成分集`];
+        if (video.muted) lines.push("当前静音，可在播放页手动开启声音。");
+        if (playbackMessage) lines.push(playbackMessage);
+        if (current.replayProgress.has(selected?.dataset.id)) lines.push("正在重播以补足该分集学时。");
+        setStatus(lines.join("\n"));
         return;
       }
       // 服务端确认所有分集完成后才导航，避免丢失最后一次记录。
@@ -511,7 +558,7 @@
       const records = await confirmProgress(current, items);
       if (!records) return;
       if ([...records.values()].some(progress => progress < 100)) {
-        status.textContent = "已同步服务端进度，将继续未完成分集…";
+        setStatus("已同步服务端进度，将继续未完成分集…");
         return;
       }
       nextCourse(current);
@@ -541,21 +588,21 @@
     // 沿用课程表的“达标后锁课”限制，不打开已被项目锁定的新课。
     if (String(window.closedCourseTag) === "true" && Number(window.assessmentRequire) > 0 &&
         Number(window.assessmentComplete) >= Number(window.assessmentRequire)) {
-      status.textContent = "项目已达标并启用锁课，请在平台确认后手动选择课程。";
+      setStatus("项目已达标并启用锁课，请在平台确认后手动选择课程。");
       return;
     }
     if (!player || player.closed) player = window.open("about:blank", "enaea-managed-player");
     if (!player) {
-      status.textContent = "新标签页被拦截，请允许本网站打开弹出式窗口后重试。";
+      setStatus("新标签页被拦截，请允许本网站打开弹出式窗口后重试。");
       return;
     }
-    run = { index: 0, busy: false, endedSince: 0 };
+    run = { index: 0, busy: false, endedSince: 0, playController: new AbortController() };
     const current = run;
     study.baseline = null;
     study.baselineAt = 0;
     startButton.disabled = true;
     loadButton.disabled = true;
-    status.textContent = "正在读取本次连播的学时基准…";
+    setStatus("正在读取本次连播的学时基准…");
     void begin(current);
   }
 
@@ -581,7 +628,7 @@
     const rate = selectedRate();
     try {
       const video = run && player && !player.closed ? player.document.querySelector("video") : null;
-      if (video) video.playbackRate = rate;
+      if (video) applyRate(video, rate);
     } catch (error) {
       console.warn("[课程连播] 暂时无法设置倍速：", error.message);
     }
@@ -621,3 +668,9 @@
 本次新增验证覆盖默认 1 倍与最高 3 倍限制、设定值与实际值分别显示、服务端增量计算、读取失败保留旧数据、跨课程保留基准、重新开始重建基准，以及停止后旧汇总结果不得覆盖面板。
 
 播放状态监视绑定在播放文档上，视频节点替换后仍能捕获事件。视频真正进入播放状态后，会在平台本轮事件处理结束后重新落实所选倍速，避免启动时被平台重置为 1 倍。旧文档、旧视频和停止后的事件都不会恢复播放或覆盖面板。上述同步行为通过了不运行控制页定时器的事件回归测试，也在真实播放器上验证了暂停后立即显示暂停、恢复后立即显示播放中，以及恢复播放后重新落实 3 倍速。
+
+## 资源开销
+
+播放状态仍由媒体事件即时同步，定时读取作为兜底。DOM 观察器只在新增或移除的视频节点（或包含视频的容器）出现时查询状态，字幕、计时文字和普通控件变化不会触发额外查询。稳定播放时，相同状态文案和相同倍速不会反复写回页面。学时汇总仍每分钟读取一次，没有提高请求频率，也未接管平台学时上报。
+
+启动播放的等待有 8 秒上限，停止时会取消等待，避免一个挂起的播放请求把调度长期占住。定向模拟测试中，1000 次无关 DOM 变化增加 0 次全页视频查询，10 轮稳定调度增加 0 次状态写入和 0 次倍速设置；视频节点变化仍能立即同步。这些结果说明重复操作被消除，不代表整机 CPU 或内存下降的百分比。
