@@ -10,7 +10,7 @@
 
 在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。页面右下角会出现“课程连播”面板。点击“读取课程”，等待列表加载后，选择倍速，再点击“开始连播”。如果 Chrome 拦截新标签页，需要允许当前网站打开弹出式窗口后重试。
 
-保持课程表页和脚本打开的播放页都处于打开状态。可以关闭开发者工具。脚本会确认视频实际开始播放；初次启动失败时每隔至少 5 秒重试，最多 3 轮。如果 Chrome 拦截有声自动播放，会尝试静音启动，面板会提示当前静音，可以在播放页手动开启声音。仍无法启动时，面板会保留错误原因，需要手动播放。正常播放之后的普通暂停由你手动恢复；休息提醒中的“继续学习”会自动点击。运行期间可在面板切换 1、1.5、2 倍速，新分集和新课程都会使用所选速度。
+保持课程表页和脚本打开的播放页都处于打开状态。可以关闭开发者工具。脚本会确认视频实际开始播放；初次启动失败时每隔至少 5 秒重试，最多 3 轮。如果 Chrome 拦截有声自动播放，会尝试静音启动，面板会提示当前静音，可以在播放页手动开启声音。仍无法启动时，面板会保留错误原因，需要手动播放。正常播放之后的普通暂停由你手动恢复；休息提醒中的“继续学习”会自动点击。运行期间可在面板切换 1、1.5、2、3、4 倍速，新分集和新课程都会使用所选速度。
 
 ```javascript
 (() => {
@@ -31,7 +31,7 @@
   panel.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:2147483647;width:300px;padding:16px;background:white;color:#222;border:1px solid #ccc;border-radius:10px;box-shadow:0 4px 24px #0003;font:14px/1.6 sans-serif;";
   panel.innerHTML = `<strong>学习公社 · 课程连播</strong>
     <p data-status style="margin:8px 0;white-space:pre-wrap">请先读取课程列表。</p>
-    <label>倍速 <select data-rate><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option></select></label>
+    <label>倍速 <select data-rate><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="3">3×</option><option value="4">4×</option></select></label>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button data-load>读取课程</button><button data-start disabled>开始连播</button>
       <button data-stop>停止</button><button data-close>移除面板</button>
@@ -399,6 +399,8 @@
 视频到片尾后，脚本先等待至少 5 秒，再读取服务端分集记录。全部完成就换课；尚未完成则播放未完成分集，当前分集到片尾但学时不足时从头重播。重播后连续两次记录没有增加会停止，并提示检查平台计时或网络。这个过程只通过真实播放累计学时，不修改上报数据。
 
 脚本读取当前班级、当前课程表的全部分页，按平台返回顺序播放，忽略页面上临时选择的分类或完成状态筛选。已完成、无学习权限、外链、第三方播放器等非普通视频课程不会进入队列。课程中的测验需要手动处理。脚本不直接提交或修改学时记录，学时由平台播放器正常上报。
+
+以课程表服务端返回的“已学”总分钟数为准，当前课程短时测试中：3 倍速约 55 秒使已学从 75 增至 78 分钟；4 倍速约 35 秒使已学从 78 增至 80 分钟。汇总只显示整数分钟，存在取整误差，不能保证其他课程或项目使用相同计时规则。页面上的“已学”不会实时刷新，复核时需重新读取服务端汇总。
 
 当前课程的短时实测中，2 倍速约 53 秒播放了 106 秒视频，服务端分集进度从 85% 增至 92%，记录提交间隔约 30 秒；恢复 1 倍速后约 60 秒提交一次。这只能说明当时该课程的分集进度接受了倍速，不能保证所有项目的总学时折算方式一致。休息提醒点击逻辑通过了平台原生弹窗组件的模拟测试，尚未等待真实的 20 分钟提醒完成验证。
 
