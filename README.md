@@ -133,6 +133,7 @@
   /** 始终复用同一个播放标签页，避免同时播放多门课程。 */
   function navigate(current) {
     current.loadedAt = Date.now();
+    current.playerMissingSince = null;
     current.lastCheck = 0;
     current.endedSince = 0;
     current.playback = null;
@@ -288,9 +289,13 @@
       const items = [...doc.querySelectorAll(".cvtb-MCK-course-content")];
       const video = doc.querySelector("video");
       if (!items.length || !video) {
-        if (Date.now() - current.loadedAt > 60000) throw new Error("播放器加载超时。");
+        // 分集切换会暂时移除视频节点；只计算本次连续缺失，不能沿用整门课的打开时间。
+        current.playerMissingSince ??= Date.now();
+        if (Date.now() - current.playerMissingSince > 60000) throw new Error("播放器加载超时。");
+        status.textContent = "正在等待播放器初始化或切换分集…";
         return;
       }
+      current.playerMissingSince = null;
       continueAfterRest(doc);
       video.playbackRate = Number(rateSelect.value);
       // 休息提醒之外的弹窗留给用户，不切分集，也不尝试恢复播放。
@@ -318,8 +323,12 @@
           }
           return;
         }
-        const playbackMessage = await ensureStarted(current, video, selected?.dataset.id);
-        if (run !== current) return;
+        const source = video.currentSrc;
+        let playbackMessage = await ensureStarted(current, video, selected?.dataset.id);
+        // 播放承诺返回时可能已经切了分集，不能把旧视频的暂停/失败状态写进新分集面板。
+        if (run !== current || doc !== player.document || doc.querySelector("video") !== video ||
+            video.currentSrc !== source || !selected.classList.contains("current")) return;
+        if (playbackMessage === "已暂停，请在播放页手动恢复。" && !video.paused) playbackMessage = "";
         status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n${rateSelect.value} 倍速 · 剩余 ${unfinished.length} 个未完成分集`;
         if (video.muted) status.textContent += "\n当前静音，可在播放页手动开启声音。";
         if (playbackMessage) status.textContent += `\n${playbackMessage}`;
@@ -411,3 +420,5 @@
 自动播放使用视频元素的 `play()` 并检查返回结果。Chrome 对有声自动播放有限制，因此脚本在遇到 `NotAllowedError` 时使用静音启动兜底，参见 [Chrome 自动播放策略](https://developer.chrome.com/blog/autoplay/)。不会通过模拟点击保证有声自动播放。启动失败重试、静音兜底、错误提示保留和停止后恢复静音状态已通过模拟测试；修复版也已在当前真实课程页面验证无需再次点击即可自动启动。
 
 片尾处理已通过模拟测试，覆盖界面进度过期、记录不足后重播、重播无增量时停止，以及片尾核对期间用户停止后不得继续换课。真实课程的片尾完整流程仍需自然播放到结束后验证。
+
+分集切换时播放器可能短暂移除视频节点。加载超时只按本次连续缺失的时长计算，节点重新出现后重新计时，不沿用整门课的打开时间。播放请求返回后也会核对视频节点和媒体源，避免把旧分集的暂停或失败状态显示到新分集上。这两种情况均已通过模拟回归测试。
