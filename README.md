@@ -10,7 +10,7 @@
 
 在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。右下角出现面板后，点击“读取课程”，选择倍速，再点击“开始连播”。如果新标签页被拦截，允许本网站打开弹出式窗口后重试。
 
-面板里的“设定倍速”是你选择的目标值，“实际倍速”与播放/暂停/加载状态每秒从视频元素读取。分集切换或播放器刚启动时，两者可能暂时不同。正常播放后的手动暂停不会被反复恢复；首次启动失败最多重试三轮，Chrome 拦截有声自动播放时会尝试静音启动，可在播放页手动开启声音。
+面板里的“设定倍速”是你选择的目标值，“实际倍速”与播放/暂停/加载状态由播放页的媒体事件即时更新，并有每秒采样兜底；切回控制页时会立即重新读取。分集切换或播放器刚启动时，两者可能暂时不同。正常播放后的手动暂停不会被反复恢复；首次启动失败最多重试三轮，Chrome 拦截有声自动播放时会尝试静音启动，可在播放页手动开启声音。
 
 “服务端已学”来自重新读取的课程表汇总，每分钟同步一次，也可点击“刷新学时”。“本次连播增量”是最新汇总与本次开播前基准的差值，跨课程或切换倍速不重置，停止后重新开始会重新建立基准。同步失败会保留上次数据并提示；如果开播时读取失败，则在首次成功同步时建立基准，面板会显示基准时间。这个增量不是根据播放速度估算的，也不等于刚切换到某个倍速后的单独收益。
 
@@ -57,6 +57,7 @@
   let run = null;
   let loading = false;
   let destroyed = false;
+  let mediaBinding = null;
   const study = { value: null, baseline: null, baselineAt: 0, updatedAt: 0,
     error: "", requestId: 0, controller: null, pending: false };
 
@@ -68,23 +69,71 @@
     return 1;
   }
 
-  /** 独立读取视频即时状态，不依赖异步启动请求留下的提示文案。 */
+  /** 解绑旧文档，避免换课或停止后旧视频事件继续更新面板。 */
+  function detachPlayerEvents() {
+    if (!mediaBinding) return;
+    for (const event of mediaBinding.events) {
+      mediaBinding.doc.removeEventListener(event, mediaBinding.handler, true);
+    }
+    mediaBinding.observer?.disconnect();
+    mediaBinding = null;
+  }
+
+  /** 在播放文档捕获媒体事件，视频节点被替换后也能同步；不依赖控制页定时器。 */
+  function bindPlayerEvents(doc) {
+    if (!run || mediaBinding?.doc === doc) return;
+    detachPlayerEvents();
+    const current = run;
+    const events = ["play", "playing", "pause", "ended", "waiting", "canplay",
+      "loadedmetadata", "emptied", "ratechange", "volumechange", "timeupdate"];
+    const isActive = () => {
+      try { return !destroyed && run === current && doc === player.document; }
+      catch { return false; }
+    };
+    const handler = event => {
+      if (!isActive() || event.target !== doc.querySelector("video")) return;
+      if (event.type === "playing") {
+        // 平台的 play 事件可能重置为1倍；等本轮处理完成后再落实用户选择，不主动恢复暂停。
+        queueMicrotask(() => {
+          if (!isActive() || event.target !== doc.querySelector("video")) return;
+          event.target.playbackRate = selectedRate();
+          renderVideoState();
+        });
+      }
+      renderVideoState();
+    };
+    for (const event of events) doc.addEventListener(event, handler, true);
+    const observer = typeof player.MutationObserver === "function"
+      ? new player.MutationObserver(() => {
+        if (isActive()) renderVideoState();
+      }) : null;
+    observer?.observe(doc.documentElement, { childList: true, subtree: true });
+    mediaBinding = { doc, events, handler, observer };
+  }
+
+  function setVideoStatus(text) {
+    if (videoStatus.textContent !== text) videoStatus.textContent = text;
+  }
+
+  /** 媒体事件即时更新，定时采样与控制页重新可见时的读取仅作兜底。 */
   function renderVideoState() {
     try {
       if (!player || player.closed) {
-        videoStatus.textContent = "实际倍速：— · 未连接播放页";
+        setVideoStatus("实际倍速：— · 未连接播放页");
         return;
       }
-      const video = player.document.querySelector("video");
+      const doc = player.document;
+      bindPlayerEvents(doc);
+      const video = doc.querySelector("video");
       if (!video) {
-        videoStatus.textContent = "实际倍速：— · 正在加载或切换分集";
+        setVideoStatus("实际倍速：— · 正在加载或切换分集");
         return;
       }
       const state = video.ended ? "已到片尾" : video.readyState < 2 ? "正在加载" :
         video.paused ? "已暂停，可在播放页恢复" : video.readyState < 3 ? "正在缓冲" : "播放中";
-      videoStatus.textContent = `实际倍速：${video.playbackRate}× · ${state}${video.muted ? " · 静音" : ""}`;
+      setVideoStatus(`实际倍速：${video.playbackRate}× · ${state}${video.muted ? " · 静音" : ""}`);
     } catch {
-      videoStatus.textContent = "实际倍速：— · 暂时无法访问播放页";
+      setVideoStatus("实际倍速：— · 暂时无法访问播放页");
     }
   }
 
@@ -243,6 +292,7 @@
 
   /** 始终复用同一个播放标签页，避免同时播放多门课程。 */
   function navigate(current) {
+    detachPlayerEvents();
     current.loadedAt = Date.now();
     current.playerMissingSince = null;
     current.lastCheck = 0;
@@ -265,6 +315,7 @@
       clearInterval(run.studyTimer);
     }
     run = null;
+    detachPlayerEvents();
     cancelStudyRead();
     try {
       if (player && !player.closed) {
@@ -403,6 +454,7 @@
         return;
       }
       const doc = player.document;
+      bindPlayerEvents(doc);
       const items = [...doc.querySelectorAll(".cvtb-MCK-course-content")];
       const video = doc.querySelector("video");
       if (!items.length || !video) {
@@ -514,6 +566,8 @@
     clearInterval(videoTimer);
     panel.remove();
     window.removeEventListener("pagehide", onPageHide);
+    window.removeEventListener("focus", renderVideoState);
+    document.removeEventListener("visibilitychange", renderVideoState);
     delete window.enaeaPlayer;
   }
 
@@ -524,10 +578,18 @@
   panel.querySelector("[data-close]").addEventListener("click", destroy);
   refreshButton.addEventListener("click", () => void refreshStudy());
   rateSelect.addEventListener("change", () => {
-    selectedRate();
+    const rate = selectedRate();
+    try {
+      const video = run && player && !player.closed ? player.document.querySelector("video") : null;
+      if (video) video.playbackRate = rate;
+    } catch (error) {
+      console.warn("[课程连播] 暂时无法设置倍速：", error.message);
+    }
     renderVideoState();
   });
   window.addEventListener("pagehide", onPageHide);
+  window.addEventListener("focus", renderVideoState);
+  document.addEventListener("visibilitychange", renderVideoState);
   const videoTimer = setInterval(renderVideoState, 1000);
   window.enaeaPlayer = { stop, destroy, refreshStudy: () => refreshStudy() };
   void refreshStudy();
@@ -557,3 +619,5 @@
 真实平台页面曾验证过分页读取、倍速启动、分集切换、休息提醒模拟弹窗和停止恢复。模拟回归覆盖跨课程完成确认、片尾补足、无进展停止、播放失败重试、旧异步请求取消以及分集切换加载超时。
 
 本次新增验证覆盖默认 1 倍与最高 3 倍限制、设定值与实际值分别显示、服务端增量计算、读取失败保留旧数据、跨课程保留基准、重新开始重建基准，以及停止后旧汇总结果不得覆盖面板。
+
+播放状态监视绑定在播放文档上，视频节点替换后仍能捕获事件。视频真正进入播放状态后，会在平台本轮事件处理结束后重新落实所选倍速，避免启动时被平台重置为 1 倍。旧文档、旧视频和停止后的事件都不会恢复播放或覆盖面板。上述同步行为通过了不运行控制页定时器的事件回归测试，也在真实播放器上验证了暂停后立即显示暂停、恢复后立即显示播放中，以及恢复播放后重新落实 3 倍速。
