@@ -1,6 +1,6 @@
 # 学习公社云平台倍速与跨课程连播
 
-用于学习公社云平台（`study.enaea.edu.cn`）的课程表页。脚本读取当前课程表的全部分页，在一个独立的播放标签页中按顺序播放未完成的视频课，默认使用 2 倍速，并自动处理“让眼睛休息一下吧”的暂停提醒。一门课的所有分集在服务端达到 100% 后，自动进入下一门课。
+用于学习公社云平台（`study.enaea.edu.cn`）的课程表页。脚本读取当前课程表的全部分页，在一个独立的播放标签页中按顺序播放未完成的视频课，默认使用 2 倍速，并自动处理“让眼睛休息一下吧”的暂停提醒。一门课的所有分集在服务端达到 100% 后，自动进入下一门课。如果视频已到片尾但累计学时不足，会自动从头重播未完成分集以补足记录。
 
 课程表页是控制页，脚本始终运行在这里，通过同源窗口访问播放页，因此播放页更换课程后仍然有效。不需要安装插件，也不需要在每个播放页重新粘贴代码。
 
@@ -134,9 +134,9 @@
   function navigate(current) {
     current.loadedAt = Date.now();
     current.lastCheck = 0;
-    current.completeSince = 0;
     current.endedSince = 0;
     current.playback = null;
+    current.replayProgress = new Map();
     current.originalMutes = new Map();
     current.switchingUntil = 0;
     status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n正在打开课程…`;
@@ -212,6 +212,61 @@
     return state.message;
   }
 
+  /** 以服务端记录校正界面，避免最后一次上报和页面更新的先后顺序影响换课。 */
+  async function confirmProgress(current, items) {
+    const data = await readJSON("/course.do", {
+      action: "getCourseContentList", courseId: queue[current.index].id, circleId,
+    });
+    if (run !== current) return null;
+    const records = new Map(data.result.list.map(item => [String(item.id), Number(item.studyProgress)]));
+    if (records.size !== items.length || records.size !== data.result.list.length ||
+        items.some(item => !records.has(item.dataset.id)) ||
+        [...records.values()].some(progress => !Number.isFinite(progress) || progress < 0 || progress > 100)) {
+      throw new Error("服务端分集数据与播放页不一致。");
+    }
+    for (const item of items) {
+      item.querySelector('[id^="J_studyProgress_"]').textContent = `${records.get(item.dataset.id)}%`;
+    }
+    return records;
+  }
+
+  /** 全部分集已确认完成后复用窗口进入下一门；队列结束则停止播放。 */
+  function nextCourse(current) {
+    current.index++;
+    if (current.index >= queue.length) return stop("队列中的视频课程已全部完成。");
+    navigate(current);
+  }
+
+  /** 片尾先留出最后一次上报时间；时长不足时重播，连续无增量则停止避免空转。 */
+  async function handleEnded(current, items, video, selected) {
+    current.endedSince ||= Date.now();
+    status.textContent = "视频已结束，正在核对最后一次学时记录…";
+    if (Date.now() - current.endedSince < 5000 || Date.now() - current.lastCheck < 5000) return;
+    current.lastCheck = Date.now();
+    const records = await confirmProgress(current, items);
+    if (!records) return;
+    const target = items.find(item => records.get(item.dataset.id) < 100);
+    if (!target) return nextCourse(current);
+    current.endedSince = 0;
+    current.playback = null;
+    if (target !== selected) {
+      current.switchingUntil = Date.now() + 8000;
+      target.click();
+      return;
+    }
+    const progress = records.get(target.dataset.id);
+    const previous = current.replayProgress.get(target.dataset.id);
+    const stalls = previous && progress <= previous.progress ? previous.stalls + 1 : 0;
+    if (stalls >= 2) throw new Error("该分集重播后连续两次学时未增加，请检查平台计时或网络。");
+    current.replayProgress.set(target.dataset.id, { progress, stalls });
+    // 断点续播可能到达片尾但累计时长仍不足；从头真实播放补足，不修改上报数据。
+    video.currentTime = 0;
+    const message = await ensureStarted(current, video, target.dataset.id);
+    if (run !== current) return;
+    video.playbackRate = Number(rateSelect.value);
+    status.textContent = `该分集已到片尾，学时进度 ${progress}%，正在从头补足播放。\n${message}`;
+  }
+
   /** 异步检查串行执行，停止或重启后旧请求不得继续导航。 */
   async function tick(current) {
     if (run !== current || current.busy) return;
@@ -249,8 +304,12 @@
         return Number.parseFloat(progress) < 100;
       });
       const selected = items.find(item => item.classList.contains("current"));
+      if (video.ended) {
+        await handleEnded(current, items, video, selected);
+        return;
+      }
+      current.endedSince = 0;
       if (unfinished.length) {
-        current.completeSince = 0;
         // 平台常从第一集打开；已完成分集直接切到尚未完成的一集。
         if (!selected || !unfinished.includes(selected)) {
           if (Date.now() > current.switchingUntil) {
@@ -264,32 +323,19 @@
         status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n${rateSelect.value} 倍速 · 剩余 ${unfinished.length} 个未完成分集`;
         if (video.muted) status.textContent += "\n当前静音，可在播放页手动开启声音。";
         if (playbackMessage) status.textContent += `\n${playbackMessage}`;
-        if (video.ended && selected === items.at(-1)) {
-          current.endedSince ||= Date.now();
-          if (Date.now() - current.endedSince > 90000) throw new Error("视频已结束但进度未满，请检查学时记录。");
-        } else current.endedSince = 0;
+        if (current.replayProgress.has(selected?.dataset.id)) status.textContent += "\n正在重播以补足该分集学时。";
         return;
       }
       // 服务端确认所有分集完成后才导航，避免丢失最后一次记录。
-      current.completeSince ||= Date.now();
       if (Date.now() - current.lastCheck < 10000) return;
       current.lastCheck = Date.now();
-      const data = await readJSON("/course.do", {
-        action: "getCourseContentList", courseId: queue[current.index].id, circleId,
-      });
-      if (run !== current) return;
-      const ids = items.map(item => item.dataset.id);
-      const complete = data.result.list.length === ids.length && data.result.list.every(item =>
-        ids.includes(String(item.id)) && Number(item.studyProgress) >= 100
-      );
-      if (!complete) {
-        if (Date.now() - current.completeSince > 90000) throw new Error("服务端尚未确认课程完成。");
-        status.textContent = "正在等待服务端确认本课程完成…";
+      const records = await confirmProgress(current, items);
+      if (!records) return;
+      if ([...records.values()].some(progress => progress < 100)) {
+        status.textContent = "已同步服务端进度，将继续未完成分集…";
         return;
       }
-      current.index++;
-      if (current.index >= queue.length) return stop("队列中的视频课程已全部完成。");
-      navigate(current);
+      nextCourse(current);
     } catch (error) {
       if (run === current) stop(`已停止：${error.message}`);
     } finally {
@@ -350,6 +396,8 @@
 
 ## 范围与验证
 
+视频到片尾后，脚本先等待至少 5 秒，再读取服务端分集记录。全部完成就换课；尚未完成则播放未完成分集，当前分集到片尾但学时不足时从头重播。重播后连续两次记录没有增加会停止，并提示检查平台计时或网络。这个过程只通过真实播放累计学时，不修改上报数据。
+
 脚本读取当前班级、当前课程表的全部分页，按平台返回顺序播放，忽略页面上临时选择的分类或完成状态筛选。已完成、无学习权限、外链、第三方播放器等非普通视频课程不会进入队列。课程中的测验需要手动处理。脚本不直接提交或修改学时记录，学时由平台播放器正常上报。
 
 当前课程的短时实测中，2 倍速约 53 秒播放了 106 秒视频，服务端分集进度从 85% 增至 92%，记录提交间隔约 30 秒；恢复 1 倍速后约 60 秒提交一次。这只能说明当时该课程的分集进度接受了倍速，不能保证所有项目的总学时折算方式一致。休息提醒点击逻辑通过了平台原生弹窗组件的模拟测试，尚未等待真实的 20 分钟提醒完成验证。
@@ -359,3 +407,5 @@
 跨课程控制依赖课程表页保持运行，以及播放页与它处于同源。电脑休眠、Chrome 冻结控制页、登录失效或平台页面结构变化，都可能中断连播。仅切换标签页并不能保证浏览器不会限制后台定时器。
 
 自动播放使用视频元素的 `play()` 并检查返回结果。Chrome 对有声自动播放有限制，因此脚本在遇到 `NotAllowedError` 时使用静音启动兜底，参见 [Chrome 自动播放策略](https://developer.chrome.com/blog/autoplay/)。不会通过模拟点击保证有声自动播放。启动失败重试、静音兜底、错误提示保留和停止后恢复静音状态已通过模拟测试；修复版也已在当前真实课程页面验证无需再次点击即可自动启动。
+
+片尾处理已通过模拟测试，覆盖界面进度过期、记录不足后重播、重播无增量时停止，以及片尾核对期间用户停止后不得继续换课。真实课程的片尾完整流程仍需自然播放到结束后验证。
