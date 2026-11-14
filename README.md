@@ -1,16 +1,20 @@
 # 学习公社云平台倍速与跨课程连播
 
-用于学习公社云平台（`study.enaea.edu.cn`）的课程表页。脚本读取当前课程表的全部分页，在一个独立的播放标签页中按顺序播放未完成的视频课，默认使用 2 倍速，并自动处理“让眼睛休息一下吧”的暂停提醒。一门课的所有分集在服务端达到 100% 后，自动进入下一门课。如果视频已到片尾但累计学时不足，会自动从头重播未完成分集以补足记录。
+用于学习公社云平台（`study.enaea.edu.cn`）的课程表页。脚本读取当前课程表的全部分页，在一个独立的播放标签页中顺序播放未完成的视频课，并自动处理休息提醒。默认 1 倍速，上限 3 倍速，可选 1、1.5、2、3 倍速。
 
-课程表页是控制页，脚本始终运行在这里，通过同源窗口访问播放页，因此播放页更换课程后仍然有效。不需要安装插件，也不需要在每个播放页重新粘贴代码。
+课程表页是控制页，脚本一直运行在这里，通过同源窗口访问播放页，因此更换课程后仍然有效。一门课的全部分集在服务端达到 100% 后进入下一门；视频到片尾但记录未满时，会从头重播未完成分集以补足学时。
 
 ## 怎么用
 
 在 Chrome 中登录平台，进入班级的“课程学习”课程表页，地址应包含 `circleIndexRedirect.do?action=toNewMyClass&type=course`。先关闭或暂停其他正在播放的课程，平台会检测多门课程同时计时。
 
-在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。页面右下角会出现“课程连播”面板。点击“读取课程”，等待列表加载后，选择倍速，再点击“开始连播”。如果 Chrome 拦截新标签页，需要允许当前网站打开弹出式窗口后重试。
+在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。右下角出现面板后，点击“读取课程”，选择倍速，再点击“开始连播”。如果新标签页被拦截，允许本网站打开弹出式窗口后重试。
 
-保持课程表页和脚本打开的播放页都处于打开状态。可以关闭开发者工具。脚本会确认视频实际开始播放；初次启动失败时每隔至少 5 秒重试，最多 3 轮。如果 Chrome 拦截有声自动播放，会尝试静音启动，面板会提示当前静音，可以在播放页手动开启声音。仍无法启动时，面板会保留错误原因，需要手动播放。正常播放之后的普通暂停由你手动恢复；休息提醒中的“继续学习”会自动点击。运行期间可在面板切换 1、1.5、2、3、4 倍速，新分集和新课程都会使用所选速度。
+面板里的“设定倍速”是你选择的目标值，“实际倍速”与播放/暂停/加载状态每秒从视频元素读取。分集切换或播放器刚启动时，两者可能暂时不同。正常播放后的手动暂停不会被反复恢复；首次启动失败最多重试三轮，Chrome 拦截有声自动播放时会尝试静音启动，可在播放页手动开启声音。
+
+“服务端已学”来自重新读取的课程表汇总，每分钟同步一次，也可点击“刷新学时”。“本次连播增量”是最新汇总与本次开播前基准的差值，跨课程或切换倍速不重置，停止后重新开始会重新建立基准。同步失败会保留上次数据并提示；如果开播时读取失败，则在首次成功同步时建立基准，面板会显示基准时间。这个增量不是根据播放速度估算的，也不等于刚切换到某个倍速后的单独收益。
+
+保持控制页和播放页都打开，可以关闭开发者工具。课程中的测验需要手动处理。
 
 ```javascript
 (() => {
@@ -31,21 +35,128 @@
   panel.style.cssText = "position:fixed;right:20px;bottom:20px;z-index:2147483647;width:300px;padding:16px;background:white;color:#222;border:1px solid #ccc;border-radius:10px;box-shadow:0 4px 24px #0003;font:14px/1.6 sans-serif;";
   panel.innerHTML = `<strong>学习公社 · 课程连播</strong>
     <p data-status style="margin:8px 0;white-space:pre-wrap">请先读取课程列表。</p>
-    <label>倍速 <select data-rate><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="3">3×</option><option value="4">4×</option></select></label>
+    <label>设定倍速 <select data-rate><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option></select></label>
+    <p data-video style="margin:8px 0">实际倍速：— · 尚未开始</p>
+    <p data-study style="margin:8px 0;white-space:pre-wrap">服务端已学：尚未读取</p>
     <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
       <button data-load>读取课程</button><button data-start disabled>开始连播</button>
       <button data-stop>停止</button><button data-close>移除面板</button>
+      <button data-refresh>刷新学时</button>
     </div>`;
   document.body.append(panel);
   const status = panel.querySelector("[data-status]");
   const loadButton = panel.querySelector("[data-load]");
   const startButton = panel.querySelector("[data-start]");
   const rateSelect = panel.querySelector("[data-rate]");
+  const videoStatus = panel.querySelector("[data-video]");
+  const studyStatus = panel.querySelector("[data-study]");
+  const refreshButton = panel.querySelector("[data-refresh]");
+  const allowedRates = new Set([1, 1.5, 2, 3]);
   let queue = [];
   let player = null;
   let run = null;
   let loading = false;
   let destroyed = false;
+  const study = { value: null, baseline: null, baselineAt: 0, updatedAt: 0,
+    error: "", requestId: 0, controller: null, pending: false };
+
+  /** 限制实际设置值，避免旧面板或异常选项把倍速带出支持范围。 */
+  function selectedRate() {
+    const value = Number(rateSelect.value);
+    if (allowedRates.has(value)) return value;
+    rateSelect.value = "1";
+    return 1;
+  }
+
+  /** 独立读取视频即时状态，不依赖异步启动请求留下的提示文案。 */
+  function renderVideoState() {
+    try {
+      if (!player || player.closed) {
+        videoStatus.textContent = "实际倍速：— · 未连接播放页";
+        return;
+      }
+      const video = player.document.querySelector("video");
+      if (!video) {
+        videoStatus.textContent = "实际倍速：— · 正在加载或切换分集";
+        return;
+      }
+      const state = video.ended ? "已到片尾" : video.readyState < 2 ? "正在加载" :
+        video.paused ? "已暂停，可在播放页恢复" : video.readyState < 3 ? "正在缓冲" : "播放中";
+      videoStatus.textContent = `实际倍速：${video.playbackRate}× · ${state}${video.muted ? " · 静音" : ""}`;
+    } catch {
+      videoStatus.textContent = "实际倍速：— · 暂时无法访问播放页";
+    }
+  }
+
+  /** 增量只取服务端汇总之差，读取失败时保留上次值并明确显示数据已过期。 */
+  function renderStudy() {
+    const lines = [study.value === null ? "服务端已学：尚未读取" : `服务端已学：${study.value} 分钟`];
+    if (study.baseline !== null && study.value !== null) {
+      const delta = study.value - study.baseline;
+      lines.push(delta < 0 ? "汇总值回退，本次增量暂不计算" : `本次连播增量：${delta} 分钟`);
+      lines.push(`基准时间：${new Date(study.baselineAt).toLocaleTimeString()}`);
+    }
+    if (study.updatedAt) lines.push(`上次同步：${new Date(study.updatedAt).toLocaleTimeString()}`);
+    if (study.error) lines.push(`同步失败：${study.error}；以上为上次成功数据。`);
+    else if (study.pending) lines.push("正在同步…");
+    studyStatus.textContent = lines.join("\n");
+    refreshButton.disabled = study.pending;
+  }
+
+  /** 取消旧会话的只读请求，防止停止/重启后的旧结果覆盖新基准。 */
+  function cancelStudyRead() {
+    study.requestId++;
+    study.controller?.abort();
+    study.controller = null;
+    study.pending = false;
+  }
+
+  /** 每分钟读取课程表汇总 HTML，不推算或写入平台学时。 */
+  async function refreshStudy(current = run, resetBaseline = false) {
+    if (destroyed || (study.pending && !resetBaseline)) return;
+    cancelStudyRead();
+    const requestId = study.requestId;
+    const controller = new AbortController();
+    study.controller = controller;
+    study.pending = true;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    renderStudy();
+    try {
+      const url = new URL(location.href);
+      url.searchParams.set("ct", String(Date.now()));
+      const response = await fetch(url, {
+        credentials: "same-origin", cache: "no-store", signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      if (destroyed || requestId !== study.requestId || run !== current) return;
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const label = [...doc.querySelectorAll(".class-survey .require")]
+        .map(node => node.textContent.trim()).find(text => /^已学[：:]/.test(text));
+      const match = label?.match(/^已学[：:]\s*(\d+)\s*分钟\s*$/);
+      if (!match) throw new Error("未找到已学总分钟数，请检查登录状态或页面变化");
+      const value = Number(match[1]);
+      if (!Number.isSafeInteger(value)) throw new Error("已学分钟数异常");
+      study.value = value;
+      study.updatedAt = Date.now();
+      study.error = "";
+      if (current && (resetBaseline || study.baseline === null)) {
+        study.baseline = value;
+        study.baselineAt = study.updatedAt;
+      }
+    } catch (error) {
+      if (!destroyed && requestId === study.requestId && run === current) {
+        study.error = error.name === "AbortError" ? "读取超时" : error.message;
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (requestId === study.requestId) {
+        study.pending = false;
+        study.controller = null;
+        if (!destroyed) renderStudy();
+      }
+    }
+  }
 
   /** 只读列表与完成状态；超时或登录失效时停止，不重放学时上报请求。 */
   async function readJSON(path, values) {
@@ -149,8 +260,12 @@
   /** 仅停止本控制页管理的窗口，恢复正常速度，避免留下后台播放。 */
   function stop(message = "已停止，可重新读取课程后继续。") {
     const previous = run;
-    if (run) clearInterval(run.timer);
+    if (run) {
+      clearInterval(run.timer);
+      clearInterval(run.studyTimer);
+    }
     run = null;
+    cancelStudyRead();
     try {
       if (player && !player.closed) {
         for (const video of player.document.querySelectorAll("video")) {
@@ -166,6 +281,8 @@
     startButton.disabled = !queue.length;
     loadButton.disabled = false;
     status.textContent = message;
+    renderVideoState();
+    renderStudy();
   }
 
   /** 播放失败不记为成功；仅在首次启动阶段重试，播放过后的手动暂停保持不变。 */
@@ -264,7 +381,7 @@
     video.currentTime = 0;
     const message = await ensureStarted(current, video, target.dataset.id);
     if (run !== current) return;
-    video.playbackRate = Number(rateSelect.value);
+    video.playbackRate = selectedRate();
     status.textContent = `该分集已到片尾，学时进度 ${progress}%，正在从头补足播放。\n${message}`;
   }
 
@@ -297,7 +414,7 @@
       }
       current.playerMissingSince = null;
       continueAfterRest(doc);
-      video.playbackRate = Number(rateSelect.value);
+      video.playbackRate = selectedRate();
       // 休息提醒之外的弹窗留给用户，不切分集，也不尝试恢复播放。
       if ([...doc.querySelectorAll(".dialog-header")].some(el => el.getClientRects().length)) {
         status.textContent = "播放页有提示或测验，请手动处理后继续。";
@@ -328,8 +445,9 @@
         // 播放承诺返回时可能已经切了分集，不能把旧视频的暂停/失败状态写进新分集面板。
         if (run !== current || doc !== player.document || doc.querySelector("video") !== video ||
             video.currentSrc !== source || !selected.classList.contains("current")) return;
-        if (playbackMessage === "已暂停，请在播放页手动恢复。" && !video.paused) playbackMessage = "";
-        status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n${rateSelect.value} 倍速 · 剩余 ${unfinished.length} 个未完成分集`;
+        // 暂停状态由独立监视器即时显示，避免两处文案给出不同结论。
+        if (playbackMessage === "已暂停，请在播放页手动恢复。") playbackMessage = "";
+        status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n剩余 ${unfinished.length} 个未完成分集`;
         if (video.muted) status.textContent += "\n当前静音，可在播放页手动开启声音。";
         if (playbackMessage) status.textContent += `\n${playbackMessage}`;
         if (current.replayProgress.has(selected?.dataset.id)) status.textContent += "\n正在重播以补足该分集学时。";
@@ -352,6 +470,19 @@
     }
   }
 
+  /** 开播前读取新基准；汇总不可读时仍可播放，待后续同步成功再建立基准。 */
+  async function begin(current) {
+    try {
+      await refreshStudy(current, true);
+      if (run !== current) return;
+      navigate(current);
+      current.timer = setInterval(() => void tick(current), 2000);
+      current.studyTimer = setInterval(() => void refreshStudy(current), 60000);
+    } catch (error) {
+      if (run === current) stop(`无法打开播放页：${error.message}`);
+    }
+  }
+
   /** 由按钮点击同步开窗，避免跨页面时被弹窗拦截。 */
   function start() {
     if (run || loading || !queue.length) return;
@@ -368,20 +499,19 @@
     }
     run = { index: 0, busy: false, endedSince: 0 };
     const current = run;
+    study.baseline = null;
+    study.baselineAt = 0;
     startButton.disabled = true;
     loadButton.disabled = true;
-    try {
-      navigate(current);
-      current.timer = setInterval(() => void tick(current), 2000);
-    } catch (error) {
-      stop(`无法打开播放页：${error.message}`);
-    }
+    status.textContent = "正在读取本次连播的学时基准…";
+    void begin(current);
   }
 
   /** 清理定时器和事件；重复粘贴时先销毁上一个实例。 */
   function destroy() {
     destroyed = true;
     stop();
+    clearInterval(videoTimer);
     panel.remove();
     window.removeEventListener("pagehide", onPageHide);
     delete window.enaeaPlayer;
@@ -392,33 +522,38 @@
   startButton.addEventListener("click", start);
   panel.querySelector("[data-stop]").addEventListener("click", () => stop());
   panel.querySelector("[data-close]").addEventListener("click", destroy);
+  refreshButton.addEventListener("click", () => void refreshStudy());
+  rateSelect.addEventListener("change", () => {
+    selectedRate();
+    renderVideoState();
+  });
   window.addEventListener("pagehide", onPageHide);
-  window.enaeaPlayer = { stop, destroy };
+  const videoTimer = setInterval(renderVideoState, 1000);
+  window.enaeaPlayer = { stop, destroy, refreshStudy: () => refreshStudy() };
+  void refreshStudy();
 })();
 ```
 
 ## 停止与恢复
 
-点击面板中的“停止”会停止调度、暂停脚本管理的播放页，并将其恢复为 1 倍速；如果启动时使用了静音兜底，还会恢复该视频原来的静音状态。“移除面板”会同时清理脚本。也可以在课程表页的控制台执行 `enaeaPlayer.stop()` 或 `enaeaPlayer.destroy()`。
+“停止”会停止调度和自动学时同步，暂停受控播放页，并恢复 1 倍速；如果脚本使用了静音兜底，也会恢复该视频原来的静音状态。“移除面板”还会清理监视定时器和事件。控制台也可以执行 `enaeaPlayer.stop()`、`enaeaPlayer.destroy()` 或 `enaeaPlayer.refreshStudy()`。
 
-停止后建议点击“读取课程”更新进度，再开始连播。刷新或离开控制页会停止当前播放；恢复时重新运行脚本并读取课程即可，已完成的课程和分集会被跳过。关闭播放页会停止队列。
+停止后建议重新读取课程再开始。刷新或离开控制页会停止当前播放；恢复时重新运行脚本即可，已完成课程和分集会被跳过。关闭播放页会停止队列。停止后的汇总显示保留上次成功同步值，可以手动刷新查看最终记录。
 
-## 范围与验证
+## 范围与计时方式
 
-视频到片尾后，脚本先等待至少 5 秒，再读取服务端分集记录。全部完成就换课；尚未完成则播放未完成分集，当前分集到片尾但学时不足时从头重播。重播后连续两次记录没有增加会停止，并提示检查平台计时或网络。这个过程只通过真实播放累计学时，不修改上报数据。
+队列使用当前班级、当前课程表的全部分页，按平台返回顺序播放，忽略页面上临时选择的分类或完成状态筛选。已完成、无学习权限、外链和其他非普通视频课程不会加入队列。
 
-脚本读取当前班级、当前课程表的全部分页，按平台返回顺序播放，忽略页面上临时选择的分类或完成状态筛选。已完成、无学习权限、外链、第三方播放器等非普通视频课程不会进入队列。课程中的测验需要手动处理。脚本不直接提交或修改学时记录，学时由平台播放器正常上报。
+播放器具备按配置生成倍速选项的能力，但检查过的课程下发配置只有 1 倍速。脚本通过视频元素设置播放速度，不修改平台计时回调，不补算视频跨过的秒数，也不直接提交或重放 `studyLog.do` 请求。学时增量只读自服务端汇总，最终计时以平台实际记录为准。
 
-以课程表服务端返回的“已学”总分钟数为准，当前课程短时测试中：3 倍速约 55 秒使已学从 75 增至 78 分钟；4 倍速约 35 秒使已学从 78 增至 80 分钟。汇总只显示整数分钟，存在取整误差，不能保证其他课程或项目使用相同计时规则。页面上的“已学”不会实时刷新，复核时需重新读取服务端汇总。
+平台播放器按播放进度事件的整数秒变化次数计数，并非直接累计视频前进的秒数。此前短时实测中，3 倍速约 55 秒增加了 3 分钟“已学”；4 倍速约 35 秒增加了 2 分钟；10 倍速约 30 秒虽然播放了约 300 秒内容，却只增加了 2 分钟。服务端汇总有整数取整和上报批次影响，这些样本不保证其他课程或项目使用相同规则。本脚本当前最高提供 3 倍速。
 
-当前课程的短时实测中，2 倍速约 53 秒播放了 106 秒视频，服务端分集进度从 85% 增至 92%，记录提交间隔约 30 秒；恢复 1 倍速后约 60 秒提交一次。这只能说明当时该课程的分集进度接受了倍速，不能保证所有项目的总学时折算方式一致。休息提醒点击逻辑通过了平台原生弹窗组件的模拟测试，尚未等待真实的 20 分钟提醒完成验证。
+视频到片尾后至少等待 5 秒再核对服务端记录；未完成则继续相应分集，连续两次重播都没有增加记录时停止并报错。分集切换时只按视频节点本次连续缺失的时长判断加载超时，避免把整门课的运行时间误当成新分集的加载时间。
 
-新版已在真实页面验证全部分页读取、受控播放标签页打开、已完成分集跳过、2 倍速启动、跨窗口处理模拟休息提醒，以及停止后暂停并恢复 1 倍速。跨课程跳转、服务端未完成时等待、队列结束、弹窗等待和停止后的异步竞态通过了模拟测试；尚未连续播放完一整门课来完成真实的跨课程切换验证。
+电脑休眠、Chrome 冻结控制页、登录失效或平台结构变化都可能中断连播。有声自动播放限制参见 [Chrome 自动播放策略](https://developer.chrome.com/blog/autoplay/)。
 
-跨课程控制依赖课程表页保持运行，以及播放页与它处于同源。电脑休眠、Chrome 冻结控制页、登录失效或平台页面结构变化，都可能中断连播。仅切换标签页并不能保证浏览器不会限制后台定时器。
+## 验证情况
 
-自动播放使用视频元素的 `play()` 并检查返回结果。Chrome 对有声自动播放有限制，因此脚本在遇到 `NotAllowedError` 时使用静音启动兜底，参见 [Chrome 自动播放策略](https://developer.chrome.com/blog/autoplay/)。不会通过模拟点击保证有声自动播放。启动失败重试、静音兜底、错误提示保留和停止后恢复静音状态已通过模拟测试；修复版也已在当前真实课程页面验证无需再次点击即可自动启动。
+真实平台页面曾验证过分页读取、倍速启动、分集切换、休息提醒模拟弹窗和停止恢复。模拟回归覆盖跨课程完成确认、片尾补足、无进展停止、播放失败重试、旧异步请求取消以及分集切换加载超时。
 
-片尾处理已通过模拟测试，覆盖界面进度过期、记录不足后重播、重播无增量时停止，以及片尾核对期间用户停止后不得继续换课。真实课程的片尾完整流程仍需自然播放到结束后验证。
-
-分集切换时播放器可能短暂移除视频节点。加载超时只按本次连续缺失的时长计算，节点重新出现后重新计时，不沿用整门课的打开时间。播放请求返回后也会核对视频节点和媒体源，避免把旧分集的暂停或失败状态显示到新分集上。这两种情况均已通过模拟回归测试。
+本次新增验证覆盖默认 1 倍与最高 3 倍限制、设定值与实际值分别显示、服务端增量计算、读取失败保留旧数据、跨课程保留基准、重新开始重建基准，以及停止后旧汇总结果不得覆盖面板。
