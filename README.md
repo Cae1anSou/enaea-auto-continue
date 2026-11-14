@@ -10,7 +10,7 @@
 
 在课程表页按 `⌘ + Option + J`（macOS）或 `Ctrl + Shift + J`（Windows / Linux）打开 Console（控制台），粘贴下面的完整代码并执行。页面右下角会出现“课程连播”面板。点击“读取课程”，等待列表加载后，选择倍速，再点击“开始连播”。如果 Chrome 拦截新标签页，需要允许当前网站打开弹出式窗口后重试。
 
-保持课程表页和脚本打开的播放页都处于打开状态。可以关闭开发者工具。播放页若提示浏览器限制自动播放，手动点击一次播放即可；脚本会为每个新视频尝试启动一次，之后的普通暂停由你手动恢复；休息提醒中的“继续学习”会自动点击。运行期间可在面板切换 1、1.5、2 倍速，新分集和新课程都会使用所选速度。
+保持课程表页和脚本打开的播放页都处于打开状态。可以关闭开发者工具。脚本会确认视频实际开始播放；初次启动失败时每隔至少 5 秒重试，最多 3 轮。如果 Chrome 拦截有声自动播放，会尝试静音启动，面板会提示当前静音，可以在播放页手动开启声音。仍无法启动时，面板会保留错误原因，需要手动播放。正常播放之后的普通暂停由你手动恢复；休息提醒中的“继续学习”会自动点击。运行期间可在面板切换 1、1.5、2 倍速，新分集和新课程都会使用所选速度。
 
 ```javascript
 (() => {
@@ -136,7 +136,8 @@
     current.lastCheck = 0;
     current.completeSince = 0;
     current.endedSince = 0;
-    current.attemptedSources = new Set();
+    current.playback = null;
+    current.originalMutes = new Map();
     current.switchingUntil = 0;
     status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n正在打开课程…`;
     const url = new URL("/viewerforccvideo.do", location.origin);
@@ -146,6 +147,7 @@
 
   /** 仅停止本控制页管理的窗口，恢复正常速度，避免留下后台播放。 */
   function stop(message = "已停止，可重新读取课程后继续。") {
+    const previous = run;
     if (run) clearInterval(run.timer);
     run = null;
     try {
@@ -153,6 +155,7 @@
         for (const video of player.document.querySelectorAll("video")) {
           video.pause();
           video.playbackRate = 1;
+          if (previous?.originalMutes.has(video)) video.muted = previous.originalMutes.get(video);
         }
       }
     } catch (error) {
@@ -162,6 +165,51 @@
     startButton.disabled = !queue.length;
     loadButton.disabled = false;
     status.textContent = message;
+  }
+
+  /** 播放失败不记为成功；仅在首次启动阶段重试，播放过后的手动暂停保持不变。 */
+  async function ensureStarted(current, video, contentId) {
+    const source = `${contentId}:${video.currentSrc}`;
+    let state = current.playback;
+    if (!state || state.video !== video || state.source !== source) {
+      state = { video, source, position: video.currentTime, started: false,
+        attempts: 0, lastAttempt: 0, message: "" };
+      current.playback = state;
+    }
+    if (!video.paused && video.currentTime > state.position + 0.25) {
+      state.started = true;
+      state.message = "";
+    }
+    if (state.started) return video.paused && !video.ended ? "已暂停，请在播放页手动恢复。" : "";
+    if (!video.paused) return "正在确认播放已启动…";
+    if (video.ended || video.readyState < 2 || !video.currentSrc) return "正在等待视频加载…";
+    if (state.attempts >= 3) return state.message || "自动启动失败，请在播放页手动播放。";
+    if (Date.now() - state.lastAttempt < 5000) return state.message || "正在等待重试自动播放…";
+    state.lastAttempt = Date.now();
+    state.attempts++;
+    try {
+      try {
+        await video.play();
+      } catch (error) {
+        // 有声自动播放被拦截时改为静音启动，不通过伪造点击绕过浏览器策略。
+        if (error.name !== "NotAllowedError" || video.muted || run !== current) throw error;
+        if (!current.originalMutes.has(video)) current.originalMutes.set(video, video.muted);
+        video.muted = true;
+        await video.play();
+      }
+      if (run !== current) {
+        if (!run) video.pause();
+        return "";
+      }
+      state.message = "正在确认播放已启动…";
+    } catch (error) {
+      if (run !== current) return "";
+      state.message = `自动播放失败（${error.name || "Error"}）：${error.message || "未知原因"}。`;
+      if (state.attempts >= 3) state.message += " 请在播放页手动播放。";
+      else state.message += " 稍后自动重试。";
+      console.warn("[课程连播]", state.message);
+    }
+    return state.message;
   }
 
   /** 异步检查串行执行，停止或重启后旧请求不得继续导航。 */
@@ -204,23 +252,18 @@
       if (unfinished.length) {
         current.completeSince = 0;
         // 平台常从第一集打开；已完成分集直接切到尚未完成的一集。
-        if ((!selected || !unfinished.includes(selected)) && Date.now() > current.switchingUntil) {
-          current.switchingUntil = Date.now() + 8000;
-          unfinished[0].click();
+        if (!selected || !unfinished.includes(selected)) {
+          if (Date.now() > current.switchingUntil) {
+            current.switchingUntil = Date.now() + 8000;
+            unfinished[0].click();
+          }
           return;
         }
-        // 每个视频源仅尝试启动一次；弹窗已在上方拦截，不反复覆盖普通暂停。
-        const source = `${selected?.dataset.id}:${video.currentSrc}`;
-        if (video.readyState >= 2 && video.currentSrc && !current.attemptedSources.has(source)) {
-          current.attemptedSources.add(source);
-          if (video.paused && !video.ended) {
-            void video.play().catch(() => {
-              if (run === current) status.textContent = "浏览器限制自动播放，请在播放页手动点击一次播放。";
-            });
-          }
-        }
+        const playbackMessage = await ensureStarted(current, video, selected?.dataset.id);
+        if (run !== current) return;
         status.textContent = `${current.index + 1}/${queue.length} · ${queue[current.index].title}\n${rateSelect.value} 倍速 · 剩余 ${unfinished.length} 个未完成分集`;
-        if (video.paused && !video.ended) status.textContent += "\n已暂停，请在播放页手动恢复。";
+        if (video.muted) status.textContent += "\n当前静音，可在播放页手动开启声音。";
+        if (playbackMessage) status.textContent += `\n${playbackMessage}`;
         if (video.ended && selected === items.at(-1)) {
           current.endedSince ||= Date.now();
           if (Date.now() - current.endedSince > 90000) throw new Error("视频已结束但进度未满，请检查学时记录。");
@@ -301,7 +344,7 @@
 
 ## 停止与恢复
 
-点击面板中的“停止”会停止调度、暂停脚本管理的播放页，并将其恢复为 1 倍速。“移除面板”会同时清理脚本。也可以在课程表页的控制台执行 `enaeaPlayer.stop()` 或 `enaeaPlayer.destroy()`。
+点击面板中的“停止”会停止调度、暂停脚本管理的播放页，并将其恢复为 1 倍速；如果启动时使用了静音兜底，还会恢复该视频原来的静音状态。“移除面板”会同时清理脚本。也可以在课程表页的控制台执行 `enaeaPlayer.stop()` 或 `enaeaPlayer.destroy()`。
 
 停止后建议点击“读取课程”更新进度，再开始连播。刷新或离开控制页会停止当前播放；恢复时重新运行脚本并读取课程即可，已完成的课程和分集会被跳过。关闭播放页会停止队列。
 
@@ -314,3 +357,5 @@
 新版已在真实页面验证全部分页读取、受控播放标签页打开、已完成分集跳过、2 倍速启动、跨窗口处理模拟休息提醒，以及停止后暂停并恢复 1 倍速。跨课程跳转、服务端未完成时等待、队列结束、弹窗等待和停止后的异步竞态通过了模拟测试；尚未连续播放完一整门课来完成真实的跨课程切换验证。
 
 跨课程控制依赖课程表页保持运行，以及播放页与它处于同源。电脑休眠、Chrome 冻结控制页、登录失效或平台页面结构变化，都可能中断连播。仅切换标签页并不能保证浏览器不会限制后台定时器。
+
+自动播放使用视频元素的 `play()` 并检查返回结果。Chrome 对有声自动播放有限制，因此脚本在遇到 `NotAllowedError` 时使用静音启动兜底，参见 [Chrome 自动播放策略](https://developer.chrome.com/blog/autoplay/)。不会通过模拟点击保证有声自动播放。启动失败重试、静音兜底、错误提示保留和停止后恢复静音状态已通过模拟测试；修复版也已在当前真实课程页面验证无需再次点击即可自动启动。
